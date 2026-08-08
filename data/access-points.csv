@@ -1,0 +1,5 @@
+ApId;Vendor;FrequencyMHz;Rssi0
+AP1;Cisco;2412;-40.0
+AP2;Cisco;5180;-45.0
+AP3;Ubiquiti;2437;-38.0
+AP4;TPLink;5240;-47.0
