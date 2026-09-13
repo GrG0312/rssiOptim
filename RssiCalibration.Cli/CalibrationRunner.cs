@@ -31,6 +31,7 @@ namespace RssiCalibration.Cli
             CalibrationDataset dataset = new CsvDataSource(
                 settings.AccessPointsPath,
                 settings.MeasurementsPath,
+                settings.ReadingsPath,
                 settings.Aggregation,
                 settings.Separator).Load();
 
@@ -91,7 +92,8 @@ namespace RssiCalibration.Cli
         {
             Console.WriteLine();
             Console.WriteLine("=== ADATHALMAZ ===");
-            Console.WriteLine($"Access Point-ok : {dataset.AccessPoints.Count}");
+            Console.WriteLine($"Eszközök        : {dataset.AccessPoints.Count}  (gyártó + frekvencia párosok)");
+            Console.WriteLine($"AP-helyek       : {dataset.Measurements.Select(m => m.ApId).Distinct(StringComparer.OrdinalIgnoreCase).Count()}");
             Console.WriteLine($"Mérésipontok    : {dataset.Measurements.Select(m => m.PointId).Distinct().Count()}");
             Console.WriteLine($"Minták          : {dataset.Measurements.Count}");
             Console.WriteLine($"Gyártók         : {string.Join(", ", dataset.AccessPoints.Select(a => a.Vendor).Distinct())}");
@@ -118,8 +120,8 @@ namespace RssiCalibration.Cli
             Directory.CreateDirectory(settings.OutputDirectory);
 
             List<CalibrationResult> flat = all.SelectMany(x => x.Results).ToList();
-            CsvReportWriter.WriteSummary(Path.Combine(settings.OutputDirectory, "summary.csv"), flat);
-            CsvReportWriter.WriteResiduals(Path.Combine(settings.OutputDirectory, "residuals.csv"), flat);
+            CsvReportWriter.WriteSummary(Path.Combine(settings.OutputDirectory, "summary.csv"), flat, settings.Separator);
+            CsvReportWriter.WriteResiduals(Path.Combine(settings.OutputDirectory, "residuals.csv"), flat, settings.Separator);
 
             if (!settings.ExportSweep) return;
 
@@ -131,12 +133,12 @@ namespace RssiCalibration.Cli
             foreach (CalibrationResult result in finest.Results)
             {
                 IEnumerable<Measurement> samples = dataset.Measurements
-                    .Where(m => finest.Strategy.GetKey(dataset.ApOf(m)) == result.Group);
+                    .Where(m => finest.Strategy.GetKey(m) == result.Group);
 
                 curves[result.Group.Value] = engine.Sweep(dataset, samples, objective, settings.NBounds, 501);
             }
 
-            CsvReportWriter.WriteSweep(Path.Combine(settings.OutputDirectory, "sweep.csv"), curves);
+            CsvReportWriter.WriteSweep(Path.Combine(settings.OutputDirectory, "sweep.csv"), curves, settings.Separator);
         }
     }
 }

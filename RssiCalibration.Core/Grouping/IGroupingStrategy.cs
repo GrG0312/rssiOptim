@@ -20,16 +20,22 @@ namespace RssiCalibration.Core.Grouping
         public string Description { get; }
 
         /// <summary>
-        /// A csoportosítási stratégia alapján visszaadja az AccessPoint-hoz tartozó csoport kulcsot.
+        /// A csoportosítási stratégia alapján visszaadja a méréshez tartozó csoport kulcsot.
         /// </summary>
-        /// 
-        /// <param name="ap">
-        /// Az AccessPoint, amelyhez a csoport kulcsot szeretnénk lekérdezni.
+        ///
+        /// <remarks>
+        /// A kulcsot a mérésből képezzük, nem az eszközkatalógusból: egy AP-helyen több
+        /// gyártó + frekvencia párosú eszköz is megfordulhat, így a besorolást csak a konkrét
+        /// leolvasás dönti el.
+        /// </remarks>
+        ///
+        /// <param name="m">
+        /// A mérés, amelyhez a csoport kulcsot szeretnénk lekérdezni.
         /// </param>
-        /// 
+        ///
         /// <returns>
-        /// A csoport kulcs, amely alapján az AccessPoint-ot a megfelelő csoportba soroljuk.
+        /// A csoport kulcs, amely alapján a mérést a megfelelő csoportba soroljuk.
         /// </returns>
-        public GroupKey GetKey(AccessPoint ap);
+        public GroupKey GetKey(Measurement m);
     }
 }

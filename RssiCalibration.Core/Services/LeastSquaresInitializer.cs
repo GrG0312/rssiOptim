@@ -52,9 +52,9 @@ namespace RssiCalibration.Core.Services
                     continue;
                 }
 
-                // Az AP azonosító alapján lekérjük a hozzá tartozó AccessPoint objektumot
+                // A gyártó + frekvencia páros alapján lekérjük a hozzá tartozó eszközt
                 // és kiszámítjuk az x és y értékeket a logaritmikus térben
-                double x = (data.ApOf(m).Rssi0 - m.Rssi) / 10.0;
+                double x = (data.DeviceOf(m).Rssi0 - m.Rssi) / 10.0;
                 double y = Math.Log10(m.TrueDistance);
                 sumXy += x * y;
                 sumYy += y * y;

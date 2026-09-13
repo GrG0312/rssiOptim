@@ -62,8 +62,8 @@ namespace RssiCalibration.Core.Services
             options ??= new CalibrationOptions();
 
             return data.Measurements
-                // Csoportosítjuk a méréseket az Access Pointok alapján a megadott csoportosítási stratégia szerint.
-                .GroupBy(m => grouping.GetKey(data.ApOf(m)))
+                // Csoportosítjuk a méréseket a megadott csoportosítási stratégia szerint.
+                .GroupBy(m => grouping.GetKey(m))
                 // A csoportokat a kulcsuk (GroupKey) értéke szerint rendezzük, figyelmen kívül hagyva a kis- és nagybetűk közötti különbséget.
                 .OrderBy(g => g.Key.Value, StringComparer.OrdinalIgnoreCase)
                 // Minden csoporthoz meghívjuk a CalibrateGroup metódust,
@@ -84,7 +84,7 @@ namespace RssiCalibration.Core.Services
             double[] rssi0 = new double[samples.Length];
             for (int i = 0; i < samples.Length; i++)
             {
-                rssi0[i] = data.ApOf(samples[i]).Rssi0;
+                rssi0[i] = data.DeviceOf(samples[i]).Rssi0;
             }
 
             // Buffer a becsült távolságok és a valós távolságok közötti hibák tárolására.
@@ -136,6 +136,8 @@ namespace RssiCalibration.Core.Services
             List<ResidualRow> residuals = samples.Select((Measurement s, int i) => new ResidualRow(
                     s.ApId,
                     s.PointId,
+                    s.Vendor,
+                    s.FrequencyGHz,
                     s.Rssi,
                     s.TrueDistance,
                     _model.EstimateDistance(s.Rssi, rssi0[i] + bestOffset, bestN)))
@@ -209,7 +211,7 @@ namespace RssiCalibration.Core.Services
                 double n = bounds.Min + i * stepSize;
                 for (int j = 0; j < arr.Length; j++)
                 {
-                    AccessPoint ap = data.ApOf(arr[j]);
+                    AccessPoint ap = data.DeviceOf(arr[j]);
                     buffer[j] = _model.EstimateDistance(arr[j].Rssi, ap.Rssi0, n) - arr[j].TrueDistance;
                 }
                 curve.Add((n, objective.Evaluate(buffer)));

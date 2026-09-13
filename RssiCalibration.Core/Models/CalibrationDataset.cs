@@ -2,60 +2,63 @@ namespace RssiCalibration.Core.Models
 {
 
     /// <summary>
-    /// A kalibrációs adatkészletet reprezentáló osztály, amely tartalmazza az AP-kat és a méréseket.
+    /// A kalibrációs adatkészletet reprezentáló osztály, amely tartalmazza az eszközkatalógust
+    /// (gyártó + frekvencia páronként az RSSI0-t) és a mérési leolvasásokat.
     /// </summary>
     public sealed class CalibrationDataset
     {
         /// <summary>
-        /// A mérésekben szereplő AP-k azonosítója szerinti gyors eléréséhez használt szótár.
+        /// Az eszközök gyors elérése a gyártó + frekvencia páros szerint.
         /// </summary>
-        private readonly Dictionary<string, AccessPoint> _apsById;
+        private readonly Dictionary<DeviceKey, AccessPoint> _apsByDevice;
 
         /// <summary>
-        /// A hozzáférési pontok (Access Point-ok) listája.
+        /// Az eszközkatalógus: gyártó + frekvencia páronként egy bejegyzés.
         /// </summary>
         public IReadOnlyList<AccessPoint> AccessPoints { get; }
 
         /// <summary>
-        /// A mérések listája, amelyek az AP-khoz kapcsolódnak.
+        /// A mérések listája, amelyek egy-egy eszköz leolvasását írják le egy AP-helyen.
         /// </summary>
         public IReadOnlyList<Measurement> Measurements { get; }
 
         /// <summary>
-        /// Visszaadja a mérésekben szereplő AP azonosítóhoz tartozó Access Point objektumot.
+        /// Visszaadja a méréshez tartozó eszközt (gyártó + frekvencia páros szerint).
         /// </summary>
-        /// 
+        ///
         /// <param name="m">
-        /// A Measurement objektum, amelynek az AP azonosítóját szeretnénk lekérdezni.
+        /// A Measurement objektum, amelynek az eszközét szeretnénk lekérdezni.
         /// </param>
-        /// 
+        ///
         /// <returns>
-        /// Az Access Point objektum, amely megfelel a mérésekben szereplő AP azonosítónak. (m.ApId == ap.Id)
+        /// Az AccessPoint objektum, amely megfelel a mérésben szereplő gyártó + frekvencia párosnak.
         /// </returns>
-        public AccessPoint ApOf(Measurement m) => _apsById[m.ApId];
+        public AccessPoint DeviceOf(Measurement m) => _apsByDevice[m.Device];
 
         public CalibrationDataset(IReadOnlyList<AccessPoint> accessPoints, IReadOnlyList<Measurement> measurements)
         {
             AccessPoints = accessPoints;
             Measurements = measurements;
 
-            // Access Point-ok átalakítása szótárrá az AP azonosítója szerint, hogy gyorsan elérhetőek legyenek.
-            _apsById = accessPoints.ToDictionary(a => a.Id, StringComparer.OrdinalIgnoreCase);
+            // Az eszközök átalakítása szótárrá a gyártó + frekvencia páros szerint, hogy gyorsan elérhetőek legyenek.
+            _apsByDevice = accessPoints.ToDictionary(a => a.Key);
 
-            // Ellenőrizzük, hogy a mérésekben szereplő AP azonosítók mindegyike létezik-e az AP-k között.
+            // Ellenőrizzük, hogy a mérésekben szereplő minden gyártó + frekvencia páros létezik-e a katalógusban.
             string[] orphans = measurements
-                // Kiválasztjuk a mérésekben szereplő AP azonosítókat
-                .Select(m => m.ApId)
-                // Kiszűrjük azokat, amelyek nem találhatók meg az AP-k szótárában
-                .Where(id => !_apsById.ContainsKey(id))
-                // Eltávolítjuk az ismétlődő azonosítókat, figyelmen kívül hagyva a kis- és nagybetűket
-                .Distinct(StringComparer.OrdinalIgnoreCase)
+                // Kiválasztjuk a mérésekben szereplő eszközöket
+                .Select(m => m.Device)
+                // Kiszűrjük azokat, amelyek nem találhatók meg az eszközök szótárában
+                .Where(key => !_apsByDevice.ContainsKey(key))
+                // Eltávolítjuk az ismétlődő párosokat
+                .Distinct()
+                .Select(key => key.ToString())
                 .ToArray();
 
-            // Ha az előző lépés eredményeként van olyan AP azonosító, amely nem található meg az AP-k között, dobunk egy kivételt.
+            // Ha az előző lépés eredményeként van olyan eszköz, amely nem található meg a katalógusban, dobunk egy kivételt.
             if (orphans.Length > 0)
             {
-                throw new InvalidDataException($"A mérésekben ismeretlen AP azonosító(k) szerepelnek: {string.Join(", ", orphans)}");
+                throw new InvalidDataException(
+                    $"A leolvasásokban ismeretlen gyártó + frekvencia páros(ok) szerepelnek: {string.Join(", ", orphans)}");
             }
         }
     }

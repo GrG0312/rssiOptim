@@ -14,6 +14,6 @@ namespace RssiCalibration.Core.Grouping
         public string Description => "Egyetlen közös n minden AP-ra";
 
         /// <inheritdoc />
-        public GroupKey GetKey(AccessPoint ap) => new GroupKey("ALL");
+        public GroupKey GetKey(Measurement m) => new GroupKey("ALL");
     }
 }

@@ -7,9 +7,26 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>RssiCalibration.Cli</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <AssemblyName>rssi</AssemblyName>
   </PropertyGroup>
+
+  <!-- Kiadási csomag: egyetlen, önmagában futtatható fájl, telepített .NET nélkül.
+       Trimmelés nincs: a VLib reflexióval olvassa a CalibrationSettings propertyjeit
+       és az [Option] attribútumokat, azokat a trimmer kivágná. -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <PublishTrimmed>false</PublishTrimmed>
+    <DebugType>none</DebugType>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- A hivatkozott projektek XML-dokumentációja ne kerüljön a csomagba. -->
+    <AllowedReferenceRelatedFileExtensions>none</AllowedReferenceRelatedFileExtensions>
+  </PropertyGroup>
+
   <ItemGroup>
-    <ProjectReference Include="..\Argus\VisiLib.Args.csproj" />
+    <ProjectReference Include="..\VLib\VLib.Args.csproj" />
     <ProjectReference Include="..\RssiCalibration.Core\RssiCalibration.Core.csproj" />
     <ProjectReference Include="..\RssiCalibration.Data\RssiCalibration.Data.csproj" />
   </ItemGroup>

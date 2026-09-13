@@ -14,6 +14,6 @@ namespace RssiCalibration.Core.Grouping
         public string Description => "AP-nként külön n";
 
         /// <inheritdoc />
-        public GroupKey GetKey(AccessPoint ap) => new GroupKey(ap.Id);
+        public GroupKey GetKey(Measurement m) => new GroupKey(m.ApId);
     }
 }

@@ -107,13 +107,14 @@ internal static class ConsoleReporter
 
         Console.WriteLine();
         Console.WriteLine($"=== {count} LEGNAGYOBB HIBA ===");
-        string header = $"{"Csoport",-20} {"AP",-8} {"Pont",-8} {"RSSI",7} {"valós",8} {"becsült",9} {"hiba",9}";
+        string header = $"{"Csoport",-20} {"AP",-6} {"Pont",-6} {"Eszköz",-18} {"RSSI",7} {"valós",8} {"becsült",9} {"hiba",9}";
         Console.WriteLine(header);
         Console.WriteLine(new string('-', header.Length));
 
         foreach ((GroupKey group, ResidualRow row) in worst)
             Console.WriteLine(
-                $"{Truncate(group.Value, 20),-20} {Truncate(row.ApId, 8),-8} {Truncate(row.PointId, 8),-8} " +
+                $"{Truncate(group.Value, 20),-20} {Truncate(row.ApId, 6),-6} {Truncate(row.PointId, 6),-6} " +
+                $"{Truncate($"{row.Vendor} {row.FrequencyGHz:0.###}G", 18),-18} " +
                 $"{row.Rssi,7:0.0} {row.TrueDistance,8:0.00} {row.EstimatedDistance,9:0.00} " +
                 $"{row.Error,9:+0.00;-0.00}");
     }

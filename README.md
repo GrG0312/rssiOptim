@@ -1,932 +1,339 @@
 # RSSI path-loss kalibráció
 
-Ez a program azt keresi meg, hogy **egy adott épületben / környezetben milyen erősen
-gyengül a Wi-Fi jel a távolsággal** – és ebből megmondja, mennyire pontosan lehet
-a jelerősségből távolságot becsülni.
-
-Ha csak ki akarod próbálni, elég ennyi:
-
-```bash
-dotnet run --project RssiCalibration.Cli
-```
-
-majd a megjelenő `rssi>` promptba írd be:
-
-```
-run
-```
-
-A többit ez a dokumentum lépésről lépésre elmagyarázza.
+*Magyar leírás alább. [English description below](#english).*
 
 ---
 
-## Tartalom
+## Projektek
 
-1. [Mit csinál a program?](#1-mit-csinál-a-program)
-2. [Az alapfogalmak egyszerűen](#2-az-alapfogalmak-egyszerűen)
-3. [Indítás](#3-indítás)
-4. [Az első futtatás – végigvezetés](#4-az-első-futtatás--végigvezetés)
-5. [A parancsok](#5-a-parancsok)
-6. [A beállítható paraméterek](#6-a-beállítható-paraméterek)
-7. [Tipikus munkamenetek (receptek)](#7-tipikus-munkamenetek-receptek)
-8. [A saját mérési adataid használata](#8-a-saját-mérési-adataid-használata)
-9. [A kimeneti fájlok](#9-a-kimeneti-fájlok)
-10. [Gyakori hibaüzenetek](#10-gyakori-hibaüzenetek)
-11. [Hogyan működik belül?](#11-hogyan-működik-belül)
-12. [Bővítési pontok](#12-bővítési-pontok)
-13. [Az Argus könyvtár](#13-az-argus-könyvtár)
-14. [Mi van kész és mi hiányzik még](#14-mi-van-kész-és-mi-hiányzik-még)
+| projekt | mi van benne |
+|---|---|
+| `RssiCalibration.Core` | A matematika: modellek, path-loss képlet, csoportosítás, célfüggvények, optimalizálók, a motor. I/O nincs benne |
+| `RssiCalibration.Data` | CSV beolvasás, a három fájl összefűzése, mintaösszevonás |
+| `VLib` (`VLib.Args`) | Általános célú interaktív shell és paraméterkezelő könyvtár. Semmit nem tud az RSSI-ről |
+| `RssiCalibration.Cli` | A beállítások, a `run` parancs, a konzoltáblák és a CSV riportok |
 
----
-
-## 1. Mit csinál a program?
-
-### A probléma
-
-Ha egy telefonnal vagy laptoppal "látsz" egy Wi-Fi routert, meg tudod mérni, milyen
-erős a jele. Minél messzebb vagy, annál gyengébb a jel. Ebből elvileg vissza lehet
-számolni a távolságot – ezen alapul sok beltéri helymeghatározó rendszer.
-
-A visszaszámoláshoz ezt a képletet használjuk:
+## A megoldandó egyenlet
 
 ```
 d = 10 ^ ((RSSI0 - RSSI) / (10 * n))
 ```
 
-- `d` – a keresett távolság méterben
-- `RSSI` – a most mért jelerősség
-- `RSSI0` – mekkora a jelerősség pontosan 1 méterről (ez az adott AP-ra jellemző, ismert)
-- `n` – **ez a bökkenő**: ez mondja meg, milyen gyorsan gyengül a jel
+Az `RSSI0` eszközönként adott, az `n` az egyetlen ismeretlen. Az egész program nem más, mint annak az egydimenziós minimalizálása `n` szerint, hogy „mennyire tévednek a távolságbecsléseim”. A szélsőséges kitevőket a kód levágja, így egy elszálló `n` sem tud végtelenbe fordulni.
 
-Az `n` értéke a környezettől függ. Szabad ég alatt kb. 2, egy vasbeton falakkal teli
-irodaházban lehet 4 fölött is. **Nincs rá képlet – meg kell mérni.**
+## Bemenet: három CSV, betöltéskor összefűzve
 
-### A megoldás
+Azért három táblázat, hogy mindegyik kézzel is kényelmesen tölthető legyen. Alapértelmezésben pontosvesszővel elválasztva, tizedesvesszőt is elfogad.
 
-Ez a program pont ezt csinálja. Adsz neki:
+| fájl | oszlopok | sorok a mintaadatban | szerep |
+|---|---|---|---|
+| `access-points.csv` | `Vendor; FrequencyGHz; Rssi0` | 6 | **Eszközkatalógus** – Unifi/Ruckus/Cambium × 2.4/5 GHz |
+| `measurements.csv` | `ApId; PointId; TrueDistance` | 24 | **Geometria** – lemért távolságok, AP1–AP4 × P1–P6 |
+| `readings.csv` | `ApId; PointId; Vendor; FrequencyGHz; Rssi` | 144 | **A leolvasások** – 6 eszköz × 24 páros |
 
-- egy listát az AP-król (azonosító, gyártó, frekvencia, `RSSI0`),
-- és egy csomó mérést, ahol **tudod a valós távolságot is** (pl. lemérted centivel).
+A lényegi modellezési döntés: **az AP-hely egy hely, nem egy doboz.** Az eszközök szabadon cserélhetők a helyek között, ezért nincs saját azonosítójuk – a kulcs a `(Vendor, FrequencyGHz)` páros, és az `RSSI0` az eszközhöz tartozik, nem a helyhez. A gyártóneveket kis- és nagybetűtől függetlenül, a frekvenciákat három tizedesre kerekítve illeszti, így az egyik fájlban lévő `2,4` és a másikban lévő `2.40` ugyanarra az eszközre mutat. A sávbesorolás egyetlen küszöb: 3 GHz alatt `2.4GHz`, felette `5GHz`.
 
-A program pedig végigpróbálja az `n` lehetséges értékeit, és megkeresi azt, amelyiknél
-a **becsült távolság a lehető legközelebb van a valós távolsághoz**. Ezt hívjuk
-kalibrációnak.
+A betöltés a hármat egyetlen listává fűzi össze, amelyben minden leolvasás az RSSI-jét *és* a valós távolságát is magával hozza. Megállítja a futást: üres katalógus, ismétlődő eszköz, ismétlődő `(AP, pont)` távolság, olyan leolvasás, amelynek `(AP, pont)` párosához nincs távolság, és olyan leolvasás, amely a katalógusban nem szereplő eszközre hivatkozik. Az ismétlődést nem csendben felülírja, hanem elutasítja – egy duplikátum szinte biztosan elgépelés.
 
-Ezen felül összeveti, hogy jobban jársz-e, ha nem egyetlen közös `n`-t használsz
-mindenre, hanem külön értéket gyártónként, frekvenciasávonként vagy akár AP-nként.
+Az **üres `Rssi` mezőjű sorokat átugorja**, és ez szándékos munkafolyamat-támogatás: a `readings.csv` előre legenerálható az összes kombinációval, és a felmérés ütemében tölthető ki. Az `agg` beállítással az ugyanahhoz az `(AP, pont, eszköz)` hármashoz tartozó ismételt leolvasások átlagra vagy mediánra vonhatók össze.
 
-### Mire jó az eredmény?
+A CSV-olvasó szándékosan kicsi: üres sorok és `#` kommentek kihagyása, kis- és nagybetűre érzéketlen fejléc, pontos oszlopszám-ellenőrzés `fájl:sor` hibaüzenettel, `,` → `.` csere a számmá alakítás előtt. Idézőjeles mezőket nem kezel.
 
-A kapott `n` értéket beírod a saját helymeghatározó alkalmazásodba, és onnantól
-pontosabb távolságbecsléseket kapsz. A program azt is megmondja, **mennyire bízhatsz
-benne**: mekkora hibával kell számolnod méterben.
+## A kalibrációs ciklus
 
----
+A méréseket a választott stratégia csoportokba osztja, és minden csoportot külön old meg:
 
-## 2. Az alapfogalmak egyszerűen
+- Költségfüggvény: egy adott `n`-re megbecsüli minden minta távolságát, kivonja a valós távolságot, és a kapott hibavektort a célfüggvény egyetlen számmá redukálja.
+- Ezt kapja meg az optimalizáló, amely az `n`-t az `[nmin, nmax]` tartományon belül keresi.
+- A győztes `n` mellett minden mintát újraszámol – ebből lesznek a reziduálisok és a statisztikák.
 
-Ezek a szavak végig előkerülnek a program kimenetében. Itt egyszer elmagyarázzuk őket.
+Bekapcsolt `free-rssi0` mellett ez beágyazott kereséssé válik: egy külső, 81 lépéses rács a −10…+10 dBm-es `RSSI0`-korrekción, és minden lépésében egy teljes belső `n`-keresés. Az aszimmetria szándékos – az `n` valódi optimalizálót kap, mert a költséggörbéje éles, míg az eltolás csak rácsot, mert a hatása sima. Nyolcvanegyszeres munka, és valódi túlillesztési kockázat, ezért alapból ki van kapcsolva.
 
-| szó | mit jelent |
+Ettől függetlenül az `n`-t **zárt képlettel** is kiszámolja egy log-térbeli legkisebb négyzetes illesztés – egy menetben, iteráció nélkül –, és referenciaértékként kiírja. Ha az optimalizáló ettől messze áll meg, valami baj van. Kiindulási értéknek nem használja.
+
+### Hibastatisztikák
+
+Csoportonként számolja, és mindig teljes egészében kiírja, bármelyik célfüggvény vezette is a keresést:
+
+| mutató | mit jelent |
 |---|---|
-| **AP (Access Point)** | Wi-Fi hozzáférési pont, magyarul router / bázisállomás. |
-| **RSSI** | A mért jelerősség. Negatív szám, pl. `-58.6`. Minél közelebb van a nullához, annál erősebb a jel. A `-40` erős, a `-90` nagyon gyenge. |
-| **dBm** | Az RSSI mértékegysége (decibel-milliwatt). A lényeg: **10 dBm különbség tízszeres teljesítménykülönbséget jelent**, tehát ez egy "logaritmikus" skála – ezért látszik ilyen furán. |
-| **RSSI0** | A referencia-jelerősség pontosan **1 méter** távolságból. Ez az adott AP tulajdonsága, ezt te adod meg a bemeneti fájlban. |
-| **n (path-loss exponens)** | A "csillapítási kitevő": milyen gyorsan gyengül a jel a távolsággal. **Ezt keresi a program.** Kb. 2 = szabad tér, 3 = átlagos iroda, 4–5 = sok fal, vastag beton. |
-| **path loss (útveszteség)** | Az a jelenség, hogy a jel a terjedés közben gyengül. A "log-distance modell" az a képlet, amivel ezt leírjuk. |
-| **mérésipont (PointId)** | Egy hely, ahol mértél. Egy ponton több AP jelét is meg lehet mérni. |
-| **hiba / reziduális** | `becsült távolság - valós távolság`, méterben. Ha `+5`, akkor a program 5 méterrel messzebbre saccolt, mint a valóság. |
-| **célfüggvény** | Egy szám, ami megmondja, mennyire rossz az összes hiba **együtt**. A program ezt az egy számot próbálja a lehető legkisebbre szorítani. Többféle van, mert másképp lehet "rosszaságot" mérni – lásd lentebb. |
-| **optimalizáló** | Az a keresési eljárás, amivel a program végigpróbálja az `n` értékeit. |
-| **csoportosítási stratégia** | Melyik AP-k osztozzanak közös `n` értéken. |
+| `MeanError` | Előjeles átlag – egyedül ez mutatja a **torzítást** (rendszeres alá- vagy fölébecslést) |
+| `MAE` | Átlagos abszolút hiba |
+| `MedianAE` | Az abszolút hibák mediánja |
+| `RMSE` | Négyzetes középérték – mindig ≥ MAE, és a különbség a kiugró értékekkel nő |
+| `P90` | A 90. percentilis abszolút hiba |
+| `MaxAE` | A legrosszabb egyedi minta |
 
-### A hibastatisztikák
+## Csoportosítási stratégiák – `set strategy <név>` (alapértelmezés: nincs beállítva = mind lefut)
 
-A program minden csoportra kiírja ezt az öt számot. Mind méterben van:
+Azt dönti el, mely mérések osztoznak egy `n` értéken.
 
-| rövidítés | mit mond meg | mikor nézd |
-|---|---|---|
-| **MAE** | Az átlagos hiba (abszolút értékben). *"Átlagosan ennyit tévedek."* | Általános képhez. |
-| **medián** | A "középső" hiba: a mérések fele ennél pontosabb, fele ennél rosszabb. | Ha van pár nagyon rossz mérésed, ami elrontja az átlagot. Ez a szám nem hazudik. |
-| **RMSE** | Négyzetes átlag. A nagy hibákat **erősen felnagyítja**. | Ha a nagy tévedések különösen fájnak. Mindig ≥ MAE. |
-| **P90** | A 90. percentilis: a mérések 90%-a ennél pontosabb. | *"A legrosszabb esetek is beleférnek?"* |
-| **max** | A legnagyobb tévedés az egész adathalmazban. | A "legrosszabb eset". |
+| érték | egy `n` … szerint | csoport | minta/csoport | illesztett `n` |
+|---|---|---|---|---|
+| `global` | minden (egyetlen közös) | 1 | 144 | 2.352 |
+| `vendor` | gyártó | 3 | 48 | 2.33 – 2.42 |
+| `band` | frekvenciasáv | 2 | 72 | 2.20 / 2.38 |
+| `vendor-band` | gyártó × sáv | 6 | 24 | 2.25 – 2.51 |
+| `per-ap` | AP-hely | 4 | 36 | 2.22 – 2.44 |
+| `mind` | – | *(visszaáll a „mind lefut” állapotra)* | – | – |
 
-> **Miért van ebből öt?** Mert egyetlen szám félrevezető tud lenni. Ha a MAE 3 méter,
-> de a max 27 méter, akkor tipikusan jó vagy, de van néhány katasztrofális kilengés.
-> Az öt szám együtt adja ki a valós képet.
+Ha a `strategy` nincs beállítva, mindegyik stratégia lefut, és a végén összehasonlító táblázat készül; a `set s mind` ide állítja vissza.
 
----
+A finomabb bontás mindig jobban illeszkedik a saját adataira, és mindig kevesebb mintára támaszkodik – ezért zárul az összehasonlító táblázat azzal a figyelmeztetéssel, hogy a `per-ap` látszólagos fölénye lehet túlillesztés. A mintaadatok ezt alá is támasztják: minden csoport 2.20 és 2.51 közé esik, vagyis itt az őszinte válasz egyetlen közös `n` ≈ 2.35.
 
-## 3. Indítás
+## Célfüggvények – `set objective <név>` (alapértelmezés: `median`)
 
-### Amire szükséged van
+A hibavektort egyetlen minimalizálandó számmá redukálja.
 
-- **.NET 8 SDK** (a projekt `net8.0`-ra épül)
-- Semmi más – nincs NuGet-függőség, nincs adatbázis, nincs internet.
+| érték | alias | képlet | kiugró értékek | mikor használd |
+|---|---|---|---|---|
+| `mean` | `mae` | `avg(\|eᵢ\|)` | Érzékeny | Megbízol az adatban, és sima átlagos hibát akarsz |
+| `median` | `mdae` | `median(\|eᵢ\|)` | **Érzéketlen** 50% rossz mintáig | **Alapértelmezés.** Terepi adat, gyanús sorokkal |
+| `rmse` | – | `√(avg(eᵢ²))` | Nagyon érzékeny | A nagy tévedések aránytalanul sokba kerülnek |
+| `huber` | – | `0.5·eᵢ²` ha `\|eᵢ\| ≤ δ`, egyébként `δ·(\|eᵢ\| − δ/2)`, δ = 10 m | Köztes | RMSE simasága kell, de a kiugró értékek uralma nélkül |
+| `composite` | `robust` | `0.7·median(\|e\|) + 0.3·P90(\|e\|)` | Többnyire robusztus, de a farok is számít | Tipikusan jó illeszkedés, ami a legrosszabb eseteket sem hagyja figyelmen kívül |
 
-### Fordítás és futtatás
+A `huber` δ-ja, valamint a `composite` súlya és kvantilise **be van drótozva** – az osztályok paraméterként megkapnák őket, de a `set` nem teszi elérhetővé. A 10 méteres δ csak több tíz méteres helyszínen harap; kis területen a `huber` egyszerű RMSE-vé fajul.
 
-```bash
-dotnet build
+## Optimalizálók – `set optimizer <név>` (alapértelmezés: `hybrid`)
+
+Egydimenziós minimumkeresők az `n ∈ [nmin, nmax]` tartományon.
+
+| érték | módszer | kiértékelés csoportonként | pontosság | több minimum esetén jó? |
+|---|---|---|---|---|
+| `grid` | Nyers erő 5001 egyenletes ponton | 5001, fixen | A lépésköz – `[1,6]`-on kb. 0.001 | **Igen** |
+| `golden` | Aranymetszéses keresés: a szakaszt lépésenként φ ≈ 0.618 arányban szűkíti | ~30–35 | 1e-6 | **Nem** – egyetlen völgyet feltételez |
+| `hybrid` | 201 pontos rács → aranymetszés a győztes ±1 lépésnyi környezetében | ~235 | 1e-7 | **Igen** |
+
+A `hybrid` a kézenfekvő okból alapértelmezett: nagyjából 20-szor olcsóbb a `grid`-nél, három nagyságrenddel pontosabb, és ugyanúgy robusztus – ráadásul megtartja a durva rács eredményét tartaléknak, ha a finomítás valamiért rosszabbat adna.
+
+A választás ritkán változtat az eredményen, mert a költséggörbe általában egyetlen sima völgy. Ott számít, ahol a `median` vagy a `composite` szakaszonként lapos görbét ad apró lépcsőkkel, illetve bekapcsolt `free-rssi0` mellett, ahol a belső keresés csoportonként 81-szer fut le: ott a `grid` csoportonként 405 000 kiértékelést jelent a `hybrid` ~19 000-ével szemben.
+
+## A beállítások
+
+| kategória | név | aliasok | típus | alapértelmezés |
+|---|---|---|---|---|
+| Adatforrás | `aps` | `a` | útvonal | `data/access-points.csv` |
+| Adatforrás | `measurements` | `m`, `mer` | útvonal | `data/measurements.csv` |
+| Adatforrás | `readings` | `rd`, `leolvasas` | útvonal | `data/readings.csv` |
+| Adatforrás | `separator` | `sep` | karakter (`tab`/`comma` is írható) | `;` |
+| Adatforrás | `aggregate` | `agg` | `None` \| `Mean` \| `Median` | `None` |
+| Modell | `objective` | `obj` | lásd a fenti táblát | `median` |
+| Modell | `free-rssi0` | `rssi0` | kapcsoló | ki |
+| Modell | `strategy` | `s` | lásd a fenti táblát | *(mind)* |
+| Keresés | `optimizer` | `opt` | lásd a fenti táblát | `hybrid` |
+| Keresés | `nmin` | – | double | `1.0` |
+| Keresés | `nmax` | – | double | `6.0` |
+| Kimenet | `out` | `o` | útvonal | `output` |
+| Kimenet | `worst` | – | egész | `10` |
+| Kimenet | `sweep` | – | kapcsoló | be |
+
+Minden `run` előtt ellenőrzés fut – `nmax > nmin`, `worst ≥ 0`, mindhárom bemeneti fájl megvan –, és minden hiba mellé jár egy tipp, például `set aps <útvonal>`. Az, hogy itt álljon meg, és ne a számítás közepén, szándékos.
+
+## Kimenet
+
+**Konzol:** adathalmaz-összefoglaló (darabszámok, gyártók, sávok, a választott célfüggvény és optimalizáló, az `n` tartománya, a zárt képletű `n`), majd stratégiánként egy tábla csoportonként egy sorral és egy összesített sorral, utána a stratégiák összehasonlítása, végül a `worst` darab legnagyobb hibájú minta AP-val, ponttal, eszközzel, RSSI-vel, valós és becsült távolsággal. Ez az utolsó tábla a gyakorlati hibakereső eszköz – egy elgépelt távolság azonnal ott jelenik meg.
+
+**Fájlok** az `out` könyvtárban:
+
+| fájl | tartalom |
+|---|---|
+| `summary.csv` | Stratégia–csoport páronként egy sor: `n`, eltolás, célfüggvényérték, mind a hat statisztika, az érintett AP-azonosítók |
+| `residuals.csv` | Minden minta: stratégia, csoport, `n`, AP, pont, gyártó, frekvencia, RSSI, valós, becsült, hiba |
+| `sweep.csv` | Széles formátum – `N` oszlop, utána csoportonként egy oszlop, 501 sor |
+
+Mindhárom **ugyanazt az elválasztót használja, mint a bemenet**, így a magyar Excelhez beállított futtatás olyan fájlokat ad, amelyeket ugyanaz az Excel vissza is olvas. A `sweep.csv` a legfontosabb diagnosztika: az éles völgy azt jelenti, hogy az `n` jól meghatározott, a lapos medence pedig azt, hogy az adat nem szorítja le – ilyenkor a kiírt pontosság hamis biztonságérzet.
+
+## A shell
+
+**Parancssori argumentumot egyáltalán nem vesz át** – a program egy `rssi>` promptot nyit, és minden beállítás onnan történik. Hat parancs van: `help`, `show`, `set`, `reset`, `exit` (mind a VLib-ből) és `run` (az egyetlen szakterületi parancs). Az üres sorokat és a `#` kommenteket kihagyja, az idézőjeles értékeket kezeli, a hibákat üzenet + tipp formában írja ki anélkül, hogy a munkamenet megszakadna – egy rossz CSV vagy elgépelés soha nem dobja ki a felhasználót.
+
+Mivel a beállítások futtatások között megmaradnak, az összehasonlító munkamenet a természetes:
+
 ```
-
-```bash
-dotnet run --project RssiCalibration.Cli
-```
-
-A program **interaktív**: elindul, és utána te adod ki neki a parancsokat.
-Indítási kapcsolókat (parancssori argumentumokat) **nem** vesz át –
-minden beállítást a `set` paranccsal állítasz, futás közben.
-
-### Hol keresi az adatokat?
-
-Alapból a `data/` könyvtárban, a projekthez mellékelt mintaadatokban. Ezek a
-fordításkor a kimeneti könyvtárba is átmásolódnak, tehát a `run` **azonnal
-működik**, mielőtt bármit beállítanál.
-
----
-
-## 4. Az első futtatás – végigvezetés
-
-Indítsd el a programot. Ez fogad:
-
-```
-RSSI path-loss kalibráció
-Az optimális n (környezeti csillapítás) keresése a log-distance modellhez.
-
-Így használd:
-  show                    a jelenlegi beállítások megtekintése
-  set <paraméter> <érték> egy beállítás módosítása
-  run                     a kalibráció lefuttatása
-  help                    minden parancs és paraméter
-  exit                    kilépés
-
-Az alapbeállítások a data/ könyvtár mintaadataira mutatnak:
-írd be, hogy 'run', és máris látod az eredményt.
-
-rssi>
-```
-
-Az `rssi>` a **prompt**: itt vár tőled parancsot. Írd be:
-
-```
+set objective median
+run
+set objective composite
 run
 ```
 
-Most végignézzük, mit ír ki, blokkonként.
+A VLib a teljes beállítási felületet **reflexióval** építi fel az `[Option]` attribútummal jelölt propertykből: egy friss példányból kiolvassa az alapértékeket, propertynként feloldja a megfelelő értelmezőt, és ebből a modellből generálja a `show`, `set`, `reset` és `help` parancsokat. Egy új beállítás felvétele egyetlen annotált property – semmi más. A névütközés, az írhatatlan property és a nem értelmezhető típus mind indításkor bukik ki, nem az első használatkor; a `bool` propertyket pedig kapcsolóként ismeri fel, így a `set free-rssi0` átbillenti az értéket, nem kér hozzá paramétert.
 
-### 4.1 Az adathalmaz összefoglalója
+## Amire érdemes figyelni
 
-```
-=== ADATHALMAZ ===
-Access Point-ok : 4
-Mérésipontok    : 6
-Minták          : 24
-Gyártók         : Cisco, Ubiquiti, TPLink
-Sávok           : 2.4GHz, 5GHz
-Célfüggvény     : median
-Optimalizáló    : hybrid(201)
-n tartomány     : [1, 6]
-n zárt képlettel: 3.001  (log-térbeli legkisebb négyzetek, referenciaérték)
-```
+**A sweep export figyelmen kívül hagyja az RSSI0 eltolást.** Bekapcsolt `free-rssi0` mellett a `sweep.csv`-ben lévő görbe nem az a görbe, amit az optimalizáló ténylegesen minimalizált, és a minimuma nem esik egybe a kiírt `n`-nel. Ha sosem használod a kapcsolót, ez nem számít.
 
-**Ez egy ellenőrző blokk.** Az első dolgod mindig az legyen, hogy megnézed: tényleg
-annyi AP-t és mérést olvasott-e be, amennyire számítottál. Ha itt 24 helyett 12 minta
-van, akkor a bemeneti fájloddal van baj, és a többi számot már felesleges nézni.
+**A `worst` és a `sweep.csv` az utoljára lefuttatott stratégiából származik** – a kód ezt „a legfinomabb” stratégiaként írja le. Ha mind az öt lefut, ez a `per-ap`, ami a szándék szerint való; ha egyetlen stratégiát rögzítesz, mindkettő abból jön. Ez tehát sorrendfüggő, nem finomság szerint rendezett.
 
-- **Minták**: hány sor mérés van összesen.
-- **Sávok**: a program a frekvenciából automatikusan eldönti, hogy 2.4 GHz-es vagy
-  5 GHz-es-e az AP (a határ 3000 MHz).
-- **n zárt képlettel**: ez egy **második, teljesen független becslés** az `n`-re, egy
-  egyszerű képlettel (legkisebb négyzetek módszere), iteráció nélkül. Nem ez az
-  eredmény – ez a **kontroll**. Ha a lentebb kapott `n` értékek nagyjából ekörül
-  szóródnak, minden rendben. Ha valamelyik nagyon messze van tőle (pl. itt 3.0
-  helyett 5.8), az gyanús: valószínűleg kevés vagy zajos az adat abban a csoportban.
-
-### 4.2 Az öt csoportosítási stratégia
-
-Ezután öt hasonló táblázat jön. Mindegyik ugyanazt az adatot dolgozza fel, csak
-másképp osztja csoportokra az AP-kat.
-
-**Első: mindenki egy közös `n`-en osztozik.**
-
-```
-=== GLOBAL - Egyetlen közös n minden AP-ra ===
-Csoport                        n   db      MAE   medián     RMSE      P90       max
------------------------------------------------------------------------------------
-ALL                        3.108   24     6.89     3.15    10.28    18.79     27.41
------------------------------------------------------------------------------------
-ÖSSZESÍTETT                        24     6.89     3.15    10.28    18.79     27.41
-```
-
-Olvasd így: *"Ha egyetlen `n`-t használok mindenre, akkor a legjobb választás
-`n = 3.108`, és ezzel átlagosan 6.89 métert tévedek, a legnagyobb tévedésem 27.41 méter."*
-
-- **Csoport**: a csoport neve. Itt `ALL`, mert minden AP egy csoportban van.
-- **n**: az adott csoportra megtalált legjobb csillapítási kitevő.
-- **db**: hány mérésre támaszkodik ez az érték. **Ez fontos!** Egy 6 mintából
-  számolt `n` sokkal bizonytalanabb, mint egy 24-ből számolt.
-- Az **ÖSSZESÍTETT** sor az összes csoport hibáit egybeönti.
-
-**Második: gyártónként külön `n`.**
-
-```
-=== VENDOR - Gyártónként külön n ===
-Csoport                        n   db      MAE   medián     RMSE      P90       max
------------------------------------------------------------------------------------
-Cisco                      3.182   12     3.49     1.27     5.14     9.43     10.10
-TPLink                     3.436    6     1.81     0.38     2.94     4.86      6.32
-Ubiquiti                   2.623    6     3.91     0.91     6.62    10.41     15.11
------------------------------------------------------------------------------------
-ÖSSZESÍTETT                        24     3.17     0.77     5.13     9.17     15.11
-```
-
-Az összesített MAE 6.89-ről 3.17-re esett. Tehát **megérte** gyártónként külön
-értéket használni – a különböző gyártók rádiói máshogy viselkednek.
-
-Ugyanígy jön még a `BAND` (frekvenciasávonként), a `VENDOR-BAND` (gyártó + sáv
-kombináció) és a `PER-AP` (minden AP-nak saját `n`).
-
-### 4.3 Az összehasonlító táblázat
-
-```
-=== STRATÉGIÁK ÖSSZEHASONLÍTÁSA (összesített hibák) ===
-Stratégia       csoport      MAE   medián     RMSE      P90       max
----------------------------------------------------------------------
-global                1     6.89     3.15    10.28    18.79     27.41
-vendor                3     3.17     0.77     5.13     9.17     15.11
-band                  2     4.27     1.31     7.26    12.82     22.28
-vendor-band           4     2.33     0.51     4.48     6.18     15.11
-per-ap                4     2.33     0.51     4.48     6.18     15.11
-
-Megjegyzés: a több csoportra bontás mindig jobb illeszkedést ad, de
-kevesebb mintára támaszkodik. A 'per-ap' látszólagos fölénye lehet túlillesztés.
-```
-
-**Ez a legfontosabb táblázat.** Egy pillantással látod, melyik felosztás éri meg.
-
-Fentről lefelé haladva a csoportok egyre kisebbek, és a hiba egyre kisebb. **Ez
-mindig így lesz** – és pont ezért kell óvatosnak lenni.
-
-> **Túlillesztés (overfitting) – mi ez?**
-> Ha minden AP-nak saját `n`-t adsz, a program külön-külön "ráhajlíthatja" a görbét
-> mindegyik AP néhány mérésére. A **meglévő** adatokon ez remek eredményt ad, de
-> könnyen lehet, hogy csak a mérési zajt tanulta meg, nem a valódi fizikát – és **új**
-> mérésen rosszabbul fog teljesíteni.
->
-> **Ökölszabály:** válaszd a legegyszerűbb felosztást, amelyik még érdemi javulást hoz.
-> A fenti példában `global → vendor` óriási ugrás (6.89 → 3.17), a
-> `vendor-band → per-ap` viszont **semmit sem javít** (2.33 → 2.33), tehát felesleges.
-> Itt a `vendor` vagy a `vendor-band` a józan választás.
->
-> Az is árulkodó, ha egy csoportban kevés a **db**: 5-6 mintából számolt `n`-t ne vegyél
-> készpénznek.
-
-### 4.4 A legnagyobb hibák
-
-```
-=== 10 LEGNAGYOBB HIBA ===
-Csoport              AP       Pont        RSSI    valós   becsült      hiba
----------------------------------------------------------------------------
-AP3                  AP3      P6         -76.7    45.00     29.89    -15.11
-AP1                  AP1      P6         -89.3    45.00     56.16    +11.16
-AP4                  AP4      P4         -96.9    22.00     28.32     +6.32
-```
-
-Itt az egyes **konkrét mérések** vannak, a legrosszabbtól kezdve. A `hiba` oszlop
-előjeles: a `-15.11` azt jelenti, hogy 15 méterrel **közelebbre** saccolt a program,
-mint a valóság.
-
-**Erre használd:** vadászd le a hibás méréseket. Ha egy adott pont (`P6`) minden
-AP-nál a lista tetején van, akkor valószínűleg **elírtad a távolságot** annál a
-pontnál, vagy volt ott valami zavaró tényező (fém szekrény, tömeg, ajtó).
-
-Figyeld meg azt is, hogy a nagy hibák jellemzően a **nagy távolságoknál** jelennek meg.
-Ez természetes: 45 méteren a jel már nagyon gyenge, és 1-2 dBm mérési zaj is több
-méteres eltérést okoz a becsült távolságban.
-
-### 4.5 A riportok
-
-Végül:
-
-```
-Riportok kiírva ide: D:\Programming\rssiOptim\output
-```
-
-Három CSV fájl készült, ezekben minden részlet benne van – lásd a
-[9. fejezetet](#9-a-kimeneti-fájlok).
-
-### 4.6 Most próbálj ki valamit
-
-A program a `run` után **nem lép ki**, és a beállításokat sem felejti el. Nyugodtan
-kísérletezz:
-
-```
-rssi> set objective composite
-rssi> run
-```
-
-Most más "rosszaság-mértéket" használ, és más `n` értékeket fog találni.
-Ha kész vagy:
-
-```
-rssi> exit
-```
+**A csoportok minimális mintaszámát semmi nem ellenőrzi.** Egy kétleolvasásos csoport ugyanolyan magabiztosan kapja meg az `n`-jét, mint egy 144 mintás, és `median` mellett két mintán a célfüggvény egyszerűen a két érték átlaga. Erre semmi nem figyelmeztet.
 
 ---
 
-## 5. A parancsok
+<a name="english"></a>
 
-| parancs | rövidítések | mit csinál |
-|---|---|---|
-| `help` | `?`, `h` | a parancsok listája |
-| `help param` | | az összes állítható paraméter, magyarázattal |
-| `help <név>` | | egy parancs **vagy** egy paraméter részletes leírása |
-| `show` | `ls`, `list` | a jelenlegi beállítások; `*` jelöli, amit átállítottál |
-| `show <param>` | | egyetlen paraméter értéke, típusa, alapértéke |
-| `set <param> <érték>` | `s` | beállítás módosítása |
-| `set <param>` | | érték nélkül: kiírja a jelenlegi értéket (kapcsolóknál bekapcsol) |
-| `reset` | | **minden** beállítás vissza az alapértékre |
-| `reset <param>` | | csak az adott paraméter vissza az alapértékre |
-| `run` | `futtat`, `r` | a kalibráció lefuttatása és a riportok kiírása |
-| `exit` | `quit`, `q` | kilépés (a **Ctrl+Z** majd Enter is ezt teszi) |
+# RSSI path-loss calibration
 
-### Jó tudni
+*English description. [Magyar leírás fentebb](#rssi-path-loss-kalibráció).*
 
-**Idézőjel a szóközös útvonalakhoz.** Ha az elérési útban szóköz van, tedd idézőjelbe:
+## Solution layout
 
-```
-set aps "C:\mérési adatok\ap.csv"
-```
-
-**Az igen/nem kapcsolók.** A `free-rssi0` és a `sweep` igen/nem típusú. Ha csak a
-nevét írod be, az **bekapcsolja**:
-
-```
-set free-rssi0
-```
-
-Kikapcsolni viszont csak kifejezett értékkel lehet (a puszta név nem billegtet ide-oda):
-
-```
-set sweep no
-```
-
-Elfogadott igenek: `igen`, `i`, `yes`, `y`, `true`, `on`, `be`, `1`.
-Elfogadott nemek: `nem`, `n`, `no`, `false`, `off`, `ki`, `0`.
-
-**Tizedesvessző is jó.** A `set nmax 5,5` és a `set nmax 5.5` ugyanaz.
-
-**Elgépelésnél nem áll le.** Ha rossz nevet vagy értéket írsz be, a program kiírja a
-hibát, javaslatot tesz, és mehet a következő parancs. Nem kell újraindítani.
-
-**Kommentek és szkriptelés.** A `#`-tel kezdődő sorokat a program figyelmen kívül
-hagyja. Így akár fájlból is beetetheted a parancsokat:
-
-```bash
-dotnet run --project RssiCalibration.Cli < parancsok.txt
-```
-
----
-
-## 6. A beállítható paraméterek
-
-A `show` parancs kiírja mindet az aktuális értékkel, a `help param` pedig
-magyarázattal együtt. Négy kategóriába vannak sorolva.
-
-### ADATFORRÁS – honnan jöjjön az adat
-
-| paraméter | rövidítés | jelentés | alap |
-|---|---|---|---|
-| `aps` | `a` | Az AP-k CSV fájlja | `data/access-points.csv` |
-| `measurements` | `m`, `mer` | A mérések CSV fájlja | `data/measurements.csv` |
-| `separator` | `sep` | A CSV oszlopelválasztója. Írhatod névvel is: `tab`, `comma`, `semicolon`, `space` | `;` |
-| `aggregate` | `agg` | Több RSSI minta összevonása: `none`, `mean`, `median` | `none` |
-
-**Az `aggregate` magyarázata.** Ha egy helyen ugyanahhoz az AP-hoz **többször** is
-mértél (ez ajánlott, mert az RSSI ingadozik), akkor egyszerűen írj több sort a
-mérésfájlba ugyanazzal az `ApId` + `PointId` párral. Ezután:
-
-- `none` – minden sor önálló minta marad (a zaj is bekerül a hibastatisztikákba)
-- `mean` – a program átlagol soronként (egyszerű, de egy kilógó érték elhúzza)
-- `median` – a középső értéket veszi (**ez az ajánlott**, mert a hibás mérést kidobja)
-
-### MODELL ÉS CÉLFÜGGVÉNY – mit optimalizáljunk
-
-| paraméter | rövidítés | jelentés | alap |
-|---|---|---|---|
-| `objective` | `obj` | A minimalizálandó hibametrika | `median` |
-| `free-rssi0` | `rssi0` | Az `RSSI0`-t is hangolja csoportonként | `nem` |
-| `strategy` | `s` | Melyik AP-k osztozzanak egy `n`-en | `mind` |
-
-**A célfüggvények (`objective`).** Ez dönti el, mit jelent az, hogy "a lehető
-legkisebb hiba":
-
-| név | mit minimalizál | mikor válaszd |
-|---|---|---|
-| `mean` (`mae`) | Az átlagos abszolút hibát | Kiegyensúlyozott, de néhány kiugró mérés elhúzhatja. |
-| `median` (`mdae`) | A középső hibát | **Robusztus**: a kiugró értékeket gyakorlatilag figyelmen kívül hagyja. Alapértelmezés. |
-| `rmse` | A négyzetes átlagot | Ha a nagy tévedések kifejezetten fájnak. Erősen bünteti őket. |
-| `huber` | Vegyes | 10 méter alatt négyzetes, felette lineáris. Kompromisszum az `rmse` és a `mean` között. |
-| `composite` (`robust`) | `0.7 × medián + 0.3 × P90` | **"Legyen jó a tipikus eset, de a kiugrók se szálljanak el."** Ha nem tudsz dönteni, ez általában jó választás. |
-
-> **Miért nem mindegy?** Mert más-más `n`-t adnak. A `median` azt mondja: "a mérések
-> fele legyen minél pontosabb, a többi nem érdekel". Az `rmse` azt: "egyetlen nagy
-> tévedés se legyen". Ez a két cél húz egymás ellen. Futtasd le mindkettővel, és nézd
-> meg, mennyire tér el az eredmény – ha alig, akkor stabil az adatod.
-
-**A `free-rssi0` magyarázata.** Alapból a program elhiszi a fájlban megadott `RSSI0`
-értéket, és csak az `n`-t keresi. Ha bekapcsolod, akkor csoportonként az `RSSI0`-hoz
-is hozzátehet egy **eltolást** (±10 dBm között), hátha úgy jobb illeszkedést kap.
-
-Akkor kapcsold be, ha gyanús, hogy az 1 méteres referenciamérésed pontatlan volt.
-Ilyenkor megjelenik egy `dRSSI0` oszlop a táblázatban, ami mutatja, mennyivel tolta el.
-**Óvatosan:** ez egy második szabad paraméter, tehát növeli a túlillesztés kockázatát.
-Ha a program konzisztensen ugyanazt az eltolást találja minden csoportnál, az arra
-utal, hogy tényleg rossz volt a referenciaértéked.
-
-**A stratégiák (`strategy`).** `mind` esetén (ez az alap) mind az öt lefut és
-összehasonlítja őket. Ha egy konkrét kell:
-
-| név | mit jelent | mikor |
-|---|---|---|
-| `global` | egyetlen `n` mindenre | homogén környezet, kevés adat |
-| `vendor` | gyártónként külön | vegyes hardverpark |
-| `band` | 2.4 GHz és 5 GHz külön | az 5 GHz-es jel jobban gyengül, ez gyakran indokolt |
-| `vendor-band` | gyártó + sáv kombináció | ha van elég adatod hozzá |
-| `per-ap` | AP-nként külön | csak sok mérésnél; egyébként túlillesztés |
-
-### KERESÉS – hogyan keressük az optimumot
-
-| paraméter | rövidítés | jelentés | alap |
-|---|---|---|---|
-| `optimizer` | `opt` | A keresési eljárás | `hybrid` |
-| `nmin` | | Az `n` tartomány alsó határa | `1.0` |
-| `nmax` | | Az `n` tartomány felső határa | `6.0` |
-
-**Az optimalizálók.** Mindhárom ugyanazt csinálja – megkeresi a legkisebb hibát adó
-`n`-t –, csak máshogy:
-
-| név | hogyan | jó/rossz |
-|---|---|---|
-| `grid` | 5001 egyenletes pontban kipróbálja | Nem elegáns, de **biztosan** megtalálja a legjobbat a rács felbontásán belül. Lassabb, de nálunk ez is ezredmásodperc. |
-| `golden` | Aranymetszéses szűkítés | Nagyon gyors és pontos, **de csak akkor jó, ha a görbének egyetlen völgye van**. A `median` célfüggvény görbéje lépcsős, ezért ott beragadhat egy rossz helyre. |
-| `hybrid` | Először durva rács (201 pont), utána aranymetszéssel finomít | **Ez az alapértelmezés, és szinte mindig ez a jó választás**: biztonságos is, pontos is. |
-
-**Az `n` tartománya.** Alapból 1 és 6 között keres. Ez a fizikailag értelmes
-tartomány. Ha az eredményed pont a szélére esik (`1.000` vagy `6.000`), az figyelmeztető
-jel: vagy hibás az adat, vagy szélesíteni kell a tartományt.
-
-### KIMENET – mit írjon ki
-
-| paraméter | rövidítés | jelentés | alap |
-|---|---|---|---|
-| `out` | `o` | A riportok könyvtára (ha nincs, létrehozza) | `output` |
-| `worst` | | Hány legnagyobb hibát listázzon a végén | `10` |
-| `sweep` | | Exportálja-e az `n` → hiba görbét | `igen` |
-
----
-
-## 7. Tipikus munkamenetek (receptek)
-
-### 7.1 "Csak nézzük meg, mi van"
-
-```
-rssi> run
-```
-
-Lefut mind az öt stratégia, és látod az összehasonlítást. **Mindig ezzel kezdj.**
-
-### 7.2 Saját adatok betöltése
-
-```
-rssi> set aps "C:\meresek\sajat-ap.csv"
-rssi> set measurements "C:\meresek\sajat-meresek.csv"
-rssi> set separator comma
-rssi> show
-rssi> run
-```
-
-A `show` előtte azért jó, mert a program **jelzi, ha egy megadott fájl nem létezik**
-(`(még nem létezik)` felirattal) – így nem a futtatás felénél derül ki.
-
-### 7.3 Több minta pontonként
-
-Ha ugyanarra a (AP, pont) párra több sort írtál a mérésfájlba:
-
-```
-rssi> set aggregate median
-rssi> run
-```
-
-### 7.4 Célfüggvények összehasonlítása
-
-```
-rssi> set objective median
-rssi> run
-rssi> set objective composite
-rssi> run
-rssi> set objective rmse
-rssi> run
-```
-
-Ha a három futtatás nagyjából ugyanazt az `n`-t adja, az **jó jel**: stabil az adatod.
-Ha nagyon eltérnek, akkor néhány kiugró mérés dominálja az eredményt – érdemes
-megnézni a `worst` listát.
-
-### 7.5 Egyetlen stratégia, tiszta kimenettel
-
-```
-rssi> set strategy vendor
-rssi> set worst 25
-rssi> run
-```
-
-### 7.6 Gyanús a referenciaértékem
-
-```
-rssi> set free-rssi0
-rssi> run
-```
-
-Nézd meg a `dRSSI0` oszlopot: ha pl. minden csoportnál `-3.5` körüli, akkor a
-mérőeszközöd konzisztensen 3.5 dBm-mel másképp mér, mint amit a fájlba írtál.
-
-### 7.7 Vissza az alaphelyzetbe
-
-```
-rssi> reset
-```
-
-vagy csak egy paramétert:
-
-```
-rssi> reset objective
-```
-
----
-
-## 8. A saját mérési adataid használata
-
-Két CSV fájl kell. **Az első nem üres, nem `#`-kezdetű sor a fejléc.**
-
-### `access-points.csv` – az AP-k
-
-| oszlop | jelentés | példa |
-|---|---|---|
-| `ApId` | az AP azonosítója (bármilyen szöveg, de egyedi legyen) | `AP1` |
-| `Vendor` | gyártó – ezt használja a `vendor` csoportosítás | `Cisco` |
-| `FrequencyMHz` | frekvencia MHz-ben; ebből jön a 2.4/5 GHz-es sáv (határ: 3000) | `2412` |
-| `Rssi0` | referencia RSSI 1 méteren, dBm | `-40.0` |
-
-```csv
-ApId;Vendor;FrequencyMHz;Rssi0
-AP1;Cisco;2412;-40.0
-AP2;Cisco;5180;-45.0
-AP3;Ubiquiti;2437;-38.0
-AP4;TPLink;5240;-47.0
-```
-
-### `measurements.csv` – a mérések
-
-| oszlop | jelentés | példa |
-|---|---|---|
-| `ApId` | melyik AP-t mérted (**szerepelnie kell** az AP-fájlban) | `AP1` |
-| `PointId` | melyik mérésiponton álltál | `P1` |
-| `Rssi` | a mért jelerősség, dBm | `-58.6` |
-| `TrueDistance` | a valós, lemért távolság, méter | `4.5` |
-
-```csv
-ApId;PointId;Rssi;TrueDistance
-AP1;P1;-58.6;4.5
-AP1;P2;-67.1;9.0
-AP1;P3;-72.3;14.0
-```
-
-### A beolvasás szabályai
-
-- Az **oszlopnevek sorrendje nem számít**, és a kis/nagybetű sem (`apid` = `ApId`).
-- A mezők körüli szóközöket levágja.
-- Az **üres sorokat** és a `#`-kel kezdődő **kommentsorokat** átugorja.
-- A számoknál **tizedesvessző is jó** (`-58,6`).
-- Az elválasztó karaktert a `separator` beállítás adja (alap: `;`, ez a magyar Excel
-  alapértelmezése is).
-- Ha egy sorban nem annyi mező van, mint a fejlécben, hibát kapsz a **sorszámmal együtt**.
-
-### Amire figyel a program
-
-- Ha ugyanaz az `ApId` kétszer szerepel az AP-fájlban → hiba.
-- Ha egy mérés olyan `ApId`-re hivatkozik, ami nincs az AP-fájlban → hiba.
-- Ha bármelyik fájl üres vagy csak fejléc van benne → hiba.
-
-### Tippek jó méréshez
-
-- **Legalább 5-6 mérésipont** AP-nként, változatos távolságokon (közel, közép, távol).
-- Mindig **le is mérd** a valós távolságot – ha ez pontatlan, a kalibráció is az lesz.
-- Egy ponton **több RSSI mintát** végy, és használd a `set aggregate median` opciót.
-  Az RSSI másodpercről másodpercre több dBm-et ingadozhat.
-- Ne csak egy folyosó mentén mérj: a program azt a környezetet fogja megtanulni,
-  amit megmutatsz neki.
-
----
-
-## 9. A kimeneti fájlok
-
-Minden `run` felülírja őket az `out` beállítás szerinti könyvtárban (alap: `output/`).
-
-| fájl | mi van benne |
+| Project | Contains |
 |---|---|
-| `summary.csv` | Stratégiánként és csoportonként az optimális `n`, az `RSSI0` eltolás és az összes hibastatisztika. |
-| `residuals.csv` | **Minden egyes mérés** külön sorban: mit becsült a program, mennyi a valóság, mekkora a hiba. |
-| `sweep.csv` | Az `n` → hiba görbe: 501 pontban kiszámolva, mennyi lenne a célfüggvény értéke minden lehetséges `n`-nél. |
+| `RssiCalibration.Core` | The maths: models, path-loss formula, grouping, objectives, optimizers, engine. No I/O |
+| `RssiCalibration.Data` | CSV reading, the three-file join, sample aggregation |
+| `VLib` (`VLib.Args`) | Generic interactive-shell + option-binding library. Knows nothing about RSSI |
+| `RssiCalibration.Cli` | Settings, the `run` command, console tables, CSV reports |
 
-### Mire jó a `sweep.csv`?
+## The equation being solved
 
-Ez a legérdekesebb fájl. Az első oszlop az `n` értéke, a többi oszlop egy-egy
-csoporté. Ha Excelben kijelölöd és vonaldiagramot rajzolsz belőle, egy **völgyet**
-látsz – a völgy alja az optimális `n`.
-
-**A völgy alakja mond el valamit:**
-
-- **Éles, keskeny völgy** → az adatod egyértelműen meghatározza az `n`-t, megbízható.
-- **Lapos, széles teknő** → sok `n` érték majdnem ugyanolyan jó. Az "optimális"
-  érték itt félig véletlen; ne vedd három tizedesjegyre komolyan.
-- **Két völgy** → valami zavar van, valószínűleg kétféle környezetből kevertél adatot.
-
-### Fontos: a kimenet formátuma
-
-A kimeneti CSV-k **vesszővel** vannak elválasztva, és **pontot** használnak
-tizedesjelnek (angolszász formátum) – függetlenül attól, mit állítottál be a
-`separator`-ban (az csak a **bemenetre** vonatkozik).
-
-Magyar Excelben ezért ne dupla kattintással nyisd meg, hanem:
-**Adatok → Szövegből/CSV-ből**, és ott állítsd be a vesszőt elválasztónak, a
-területi beállítást pedig angolra.
-
----
-
-## 10. Gyakori hibaüzenetek
-
-A program a felhasználói hibáktól **nem áll le** – kiírja, mi a baj, gyakran
-javaslattal együtt, és jöhet a következő parancs.
-
-| üzenet | mi történt | mit tegyél |
-|---|---|---|
-| `Nincs meg a fájl: ...` | A megadott CSV nem létezik | `set aps <helyes útvonal>`; a `show` kiírja, létezik-e |
-| `No parameter named 'X'` | Elgépelted a paraméter nevét | A program felajánl hasonlókat; `help param` a teljes lista |
-| `Invalid value for parameter ...` | Rossz típusú vagy nem megengedett érték | A program felsorolja az elfogadottakat |
-| `Unknown command: X` | Nincs ilyen parancs | `help` |
-| `Az nmax (...) nem lehet kisebb...` | `nmax` ≤ `nmin` | Állítsd át az egyiket |
-| `Ismétlődő AP azonosító: ...` | Kétszer szerepel ugyanaz az `ApId` az AP-fájlban | Javítsd a fájlt |
-| `A mérésekben ismeretlen AP azonosító(k)...` | Olyan AP-ra hivatkozik egy mérés, ami nincs az AP-fájlban | Elírás, vagy hiányzó AP-sor |
-| `...:12 - 4 oszlop várt, 3 érkezett` | A 12. sorban rossz a mezők száma | Nézd meg azt a sort; gyakran rossz `separator` az ok |
-| `'X' nem szám: ...` | Szám helyett szöveg van egy számoszlopban | Javítsd a fájlt |
-| `Üres vagy fejléc nélküli fájl` | Nincs fejlécsor | Írj fejlécet a fájl elejére |
-
----
-
-## 11. Hogyan működik belül?
-
-### A projektek
-
-| projekt | mi van benne | függ ettől |
-|---|---|---|
-| `Argus` | Általános célú paraméter- és parancskezelő könyvtár. **Semmit nem tud az RSSI-ről.** | – |
-| `RssiCalibration.Core` | Modellek, célfüggvények, optimalizálók, csoportosítás. A tényleges számítás. | – |
-| `RssiCalibration.Data` | CSV beolvasás és mintaösszevonás. | Core |
-| `RssiCalibration.Cli` | Az interaktív felület, a konzolriportok és a CSV kiírás. | mind |
-
-### Mi történik egy `run` alatt?
-
-1. **Ellenőrzés.** A `RunCommand` meghívja a `CalibrationSettings.Validate()`-et:
-   `nmax > nmin`? Léteznek a fájlok? Ha nem, hibaüzenet és vége – még mielőtt bármi
-   számítás indulna.
-2. **Betöltés.** A `CsvDataSource` beolvassa a két CSV-t, ellenőrzi az ismétlődő és
-   az árva azonosítókat, és ha kérted, összevonja a mintákat. **Minden `run` újraolvassa
-   a fájlokat** – ez szándékos: menet közben átírhatod az adatot, és a következő
-   futtatás már a frisset látja.
-3. **Összeállítás.** A nevekből példányok lesznek: az `ObjectiveFactory` legyártja a
-   célfüggvényt, az `OptimizerFactory` az optimalizálót.
-4. **Kontrollérték.** A `LeastSquaresInitializer` egy zárt képlettel is megbecsüli
-   az `n`-t – ez a "n zárt képlettel" sor a kimenetben.
-5. **Kalibráció.** A `CalibrationEngine` a választott stratégia szerint csoportokba
-   osztja a méréseket, és **csoportonként** megkeresi a legjobb `n`-t:
-   - végigpróbál sok `n` értéket,
-   - mindegyiknél kiszámolja az összes mérés becsült távolságát a log-distance
-     képlettel, ebből a hibákat,
-   - a hibavektorból a célfüggvény ad egy számot,
-   - a legkisebb szám nyer.
-6. **Statisztika.** Az `ErrorStatistics` a végleges `n` melletti hibákból számol MAE-t,
-   mediánt, RMSE-t, P90-et, maxot.
-7. **Riportok.** A `ConsoleReporter` a képernyőre, a `CsvReportWriter` a fájlokba ír.
-
-### A számítás magja
-
-Ez a néhány sor a program szíve (`CalibrationEngine.CalibrateGroup`):
-
-```csharp
-double Cost(double n, double offset)
-{
-    for (int i = 0; i < samples.Length; i++)
-    {
-        double estimated = _model.EstimateDistance(samples[i].Rssi, rssi0[i] + offset, n);
-        buffer[i] = estimated - samples[i].TrueDistance;   // előjeles hiba méterben
-    }
-    return objective.Evaluate(buffer);                     // egyetlen "rosszaság" szám
-}
+```
+d = 10 ^ ((RSSI0 - RSSI) / (10 * n))
 ```
 
-Az optimalizáló ezt a `Cost` függvényt hívogatja különböző `n` értékekkel, amíg meg nem
-találja a minimumot. **Minden más ezt szolgálja ki.**
+`RSSI0` is given per device; `n` is the single unknown. The whole program is a 1-D minimisation of "how wrong are my distance estimates" as a function of `n`. Extreme exponents are clamped so a wild `n` can't overflow into infinity.
 
-Ha a `free-rssi0` be van kapcsolva, kétszintű a keresés: a külső ciklus végigmegy 81
-`RSSI0`-eltolás értéken (−10-től +10 dBm-ig), és mindegyikhez a belső optimalizáló
-megkeresi a hozzá tartozó legjobb `n`-t.
+## Input: three CSVs joined at load time
 
----
+Split into three tables so each is comfortable to fill by hand. Semicolon-separated by default, decimal commas accepted.
 
-## 12. Bővítési pontok
+| File | Columns | Sample rows | Role |
+|---|---|---|---|
+| `access-points.csv` | `Vendor; FrequencyGHz; Rssi0` | 6 | **Device catalogue** — Unifi/Ruckus/Cambium × 2.4/5 GHz |
+| `measurements.csv` | `ApId; PointId; TrueDistance` | 24 | **Geometry** — tape-measured distances, AP1–AP4 × P1–P6 |
+| `readings.csv` | `ApId; PointId; Vendor; FrequencyGHz; Rssi` | 144 | **The readings** — 6 devices × 24 pairs |
 
-A program szándékosan interfészek köré épül. Ha bővíteni akarod, ezeket kell
-implementálni – a többi kód változatlanul marad.
+The crucial modelling decision: **an AP location is a place, not a box.** Devices are swappable between locations, so they have no identity of their own — the key is `(Vendor, FrequencyGHz)`, and `RSSI0` belongs to the device, not the location. Vendor names are matched case-insensitively and frequencies rounded to 3 decimals, so `2,4` in one file and `2.40` in the other resolve to the same device. Band assignment is a single threshold: below 3 GHz is `2.4GHz`, above is `5GHz`.
 
-| interfész | mit cserélsz vele | hol |
-|---|---|---|
-| `IPathLossModel` | Maga a fizikai modell (pl. ITU beltéri modell, falszám-korrekció) | `Core/PathLoss` |
-| `IErrorObjective` | Tetszőleges hibametrika | `Core/Objectives` |
-| `IOptimizer1D` | Más keresési eljárás | `Core/Optimization` |
-| `IGroupingStrategy` | Mely AP-k osztozzanak egy `n`-en | `Core/Grouping` |
-| `IValueParser` | Új paramétertípus az Argus-ban | `Argus/Parsing` |
-| `IShellCommand<T>` | Új parancs az interaktív felületen | `Argus/Shell` |
+Loading joins the three into one flat list where each reading carries its RSSI *and* its ground-truth distance. It refuses to continue on: an empty catalogue, duplicate devices, a duplicate `(AP, point)` distance, a reading whose `(AP, point)` has no distance, or a reading naming a device not in the catalogue. Duplicates are rejected rather than silently overwritten — a repeat is almost certainly a typo.
 
-**Új célfüggvény felvétele** például: írj egy osztályt `IErrorObjective`-vel, vedd fel
-az `ObjectiveFactory.Create` switchébe és az `AvailableNames` listájába. Ennyi – a
-súgó, a `set` validációja és az elfogadott értékek listája **automatikusan** frissül,
-mert az `ObjectiveParser` ebből a listából dolgozik.
+Rows with an **empty `Rssi` are skipped**, which is deliberate workflow support: `readings.csv` can be pre-generated with every combination and filled in as you survey. Optionally, `agg` collapses repeated readings of the same `(AP, point, device)` into their mean or median.
 
-**Új paraméter felvétele:** elég egy property a `CalibrationSettings`-be `[Option]`
-attribútummal. Sem a shellhez, sem a súgóhoz nem kell hozzányúlni.
+The CSV reader is deliberately small: blank lines and `#` comments skipped, case-insensitive headers, exact column count enforced with `file:line` in the error, `,` converted to `.` before parsing. No quoted-field support.
 
----
+## The calibration loop
 
-## 13. Az Argus könyvtár
+Measurements are grouped by the chosen strategy, and each group is solved independently:
 
-Az `Argus` projekt önálló, függőségmentes könyvtár: a paraméterek leírását, a típus
-szerinti értelmezésüket és az interaktív parancsértelmezőt adja. Nem hivatkozik a
-projekt többi részére, így más solutionbe is átemelhető.
+- Define a cost function: for a candidate `n`, estimate every sample's distance, subtract the true distance, and reduce the resulting error vector to one number via the objective.
+- Hand that to the optimizer, which searches `n` within `[nmin, nmax]`.
+- Recompute every sample at the winning `n` to produce residuals and statistics.
 
-### Az alapötlet
+With `free-rssi0` on, it becomes a nested search: an outer 81-step grid over an `RSSI0` correction of −10…+10 dBm, with a full inner `n` search at each step. The asymmetry is deliberate — `n` gets a real optimizer because its cost curve is sharp, while the offset gets a plain grid because its effect is smooth. It costs 81× the work and carries a real overfitting risk, so it's off by default.
 
-A paraméterek **egyetlen helyen**, egy sima beállítás-osztályban élnek. A név, a
-súgószöveg, az alapérték és a típus egymás mellett van – nincs külön argumentum-,
-súgó- és validációs kód, amit szinkronban kellene tartani.
+Separately, `n` is also computed in **closed form** by a log-space least-squares fit — one pass, no iteration — and printed as a reference. If the optimizer lands far from it, something is wrong. It is not used as a starting point.
 
-```csharp
-public sealed class CalibrationSettings
-{
-    [Option("objective",
-        Aliases = new[] { "obj" },
-        Category = "MODELL",
-        Parser = typeof(ObjectiveParser),
-        Help = "A minimalizálandó hibametrika.")]
-    public string Objective { get; set; } = "median";
+### Error statistics
 
-    [Option("nmax", Category = "KERESÉS", Help = "Az n tartomány felső határa.")]
-    public double NMax { get; set; } = 6.0;
-}
+Computed per group and always reported in full, whichever objective drove the search:
+
+| Stat | Meaning |
+|---|---|
+| `MeanError` | Signed mean — the only one that reveals **bias** (systematic over/under-estimation) |
+| `MAE` | Mean absolute error |
+| `MedianAE` | Median absolute error |
+| `RMSE` | Root mean square — always ≥ MAE, gap widens with outliers |
+| `P90` | 90th percentile absolute error |
+| `MaxAE` | Worst single sample |
+
+## Grouping strategies — `set strategy <name>` (default: unset = run all)
+
+Decides which measurements share one `n`.
+
+| Value | One `n` per… | Groups here | Samples each | Fitted `n` |
+|---|---|---|---|---|
+| `global` | everything | 1 | 144 | 2.352 |
+| `vendor` | manufacturer | 3 | 48 | 2.33 – 2.42 |
+| `band` | frequency band | 2 | 72 | 2.20 / 2.38 |
+| `vendor-band` | vendor × band | 6 | 24 | 2.25 – 2.51 |
+| `per-ap` | AP location | 4 | 36 | 2.22 – 2.44 |
+| `mind` | — | *(resets to "run all five")* | — | — |
+
+Leaving `strategy` unset runs every strategy and prints a comparison; `set s mind` returns to that state.
+
+Finer grouping always fits better in-sample and always rests on fewer samples, which is why the comparison table ends with an explicit warning that `per-ap`'s apparent lead may be overfitting. The sample data bears this out: every group lands between 2.20 and 2.51, suggesting one global `n` ≈ 2.35 is the honest answer here.
+
+## Objectives — `set objective <name>` (default `median`)
+
+Reduces the error vector to the single number being minimised.
+
+| Value | Aliases | Formula | Outliers | Use when |
+|---|---|---|---|---|
+| `mean` | `mae` | `avg(\|eᵢ\|)` | Sensitive | You trust the data and want plain average error |
+| `median` | `mdae` | `median(\|eᵢ\|)` | **Immune** up to 50% bad samples | **Default.** Field data with suspected bad rows |
+| `rmse` | — | `√(avg(eᵢ²))` | Very sensitive | Large misses are disproportionately costly |
+| `huber` | — | `0.5·eᵢ²` if `\|eᵢ\| ≤ δ`, else `δ·(\|eᵢ\| − δ/2)`, δ = 10 m | Middle ground | You want RMSE's smoothness without outlier domination |
+| `composite` | `robust` | `0.7·median(\|e\|) + 0.3·P90(\|e\|)` | Mostly robust, tail still counts | Typically-good fit that doesn't ignore worst cases |
+
+`huber`'s δ and `composite`'s weight and quantile are **hard-coded** — the classes accept them as parameters, but nothing exposes them to `set`. δ = 10 m only bites on sites tens of metres across; on a small site `huber` degenerates into plain RMSE.
+
+## Optimizers — `set optimizer <name>` (default `hybrid`)
+
+1-D minimisers over `n ∈ [nmin, nmax]`.
+
+| Value | Method | Evaluations per group | Precision | Multi-minimum safe? |
+|---|---|---|---|---|
+| `grid` | Brute force over 5001 evenly spaced points | 5001 fixed | Step size — ~0.001 on `[1,6]` | **Yes** |
+| `golden` | Golden-section: shrink the bracket by φ ≈ 0.618 each iteration | ~30–35 | 1e-6 | **No** — assumes one valley |
+| `hybrid` | 201-point grid → golden-section within ±1 step of the winner | ~235 | 1e-7 | **Yes** |
+
+`hybrid` is default for the obvious reason: ~20× cheaper than `grid`, three orders of magnitude more precise, still robust — and it keeps the coarse result as a fallback if refinement somehow scores worse.
+
+The choice rarely changes the answer, since the cost curve is normally one smooth valley. It matters with `median`/`composite`, which are piecewise-flat and can have small steps, and with `free-rssi0` on, where the inner search runs 81× per group — `grid` there means 405,000 evaluations per group versus ~19,000.
+
+## All settings
+
+| Category | Name | Aliases | Type | Default |
+|---|---|---|---|---|
+| Data source | `aps` | `a` | path | `data/access-points.csv` |
+| Data source | `measurements` | `m`, `mer` | path | `data/measurements.csv` |
+| Data source | `readings` | `rd`, `leolvasas` | path | `data/readings.csv` |
+| Data source | `separator` | `sep` | char (`tab`/`comma` spellable) | `;` |
+| Data source | `aggregate` | `agg` | `None` \| `Mean` \| `Median` | `None` |
+| Model | `objective` | `obj` | see table above | `median` |
+| Model | `free-rssi0` | `rssi0` | flag | off |
+| Model | `strategy` | `s` | see table above | *(all)* |
+| Search | `optimizer` | `opt` | see table above | `hybrid` |
+| Search | `nmin` | — | double | `1.0` |
+| Search | `nmax` | — | double | `6.0` |
+| Output | `out` | `o` | path | `output` |
+| Output | `worst` | — | int | `10` |
+| Output | `sweep` | — | flag | on |
+
+Validation runs before every `run` — `nmax > nmin`, `worst ≥ 0`, all three input files present — each failure carrying a hint like `set aps <path>`. Failing here rather than mid-calculation is intentional.
+
+## Output
+
+**Console:** a dataset summary (counts, vendors, bands, chosen objective and optimizer, `n` range, closed-form `n`), then per strategy a table of one row per group plus a pooled total row, then the cross-strategy comparison, then the `worst` largest-error samples with AP, point, device, RSSI, true vs estimated distance. That last table is the practical debugging tool — a mistyped distance shows up there immediately.
+
+**Files** in `out/`:
+
+| File | Shape |
+|---|---|
+| `summary.csv` | One row per (strategy, group): `n`, offset, objective value, all six stats, contributing AP IDs |
+| `residuals.csv` | Every sample: strategy, group, `n`, AP, point, vendor, frequency, RSSI, true, estimated, error |
+| `sweep.csv` | Wide format — column `N`, then one column per group, 501 rows |
+
+All three use the **same separator as the input**, so a run configured for Hungarian Excel produces files that same Excel reads back. `sweep.csv` is the diagnostic that matters most: a sharp valley means `n` is well determined; a flat basin means the data doesn't pin it down and the reported precision is false comfort.
+
+## The shell
+
+**No command-line arguments are accepted at all** — the program starts an `rssi>` prompt and everything is set from inside. Six commands: `help`, `show`, `set`, `reset`, `exit` (all from VLib) and `run` (the only domain command). Blank lines and `#` comments are ignored, quoted values are honoured, and errors print as message plus hint without killing the session — a bad CSV or typo never ends the run.
+
+Because settings persist between runs, the comparative workflow is the natural one:
+
+```
+set objective median
+run
+set objective composite
+run
 ```
 
-Ebből az `OptionModel` **reflexióval** felderíti a paramétereket (reflexió = a program
-futás közben megvizsgálja a saját osztályait), az alapértékeket pedig egy friss
-példányból olvassa ki – ezért maradhatnak ott, ahol a legolvashatóbbak: a property
-inicializálójában.
+VLib builds the entire settings UI by **reflection** over `[Option]`-annotated properties: it captures defaults from a fresh instance, resolves a parser per property, and generates `show`, `set`, `reset` and `help` from that model. Adding a setting means adding one annotated property and nothing else. Clashing names, unwritable properties and unparseable types all fail at startup rather than at first use, and `bool` properties are detected as flags, so `set free-rssi0` toggles rather than requiring a value.
 
-### Típus szerinti parserek
+## Sharp edges worth knowing
 
-Minden paraméterértéket egy `IValueParser` olvas be. A választás típus alapján történik
-a `ParserRegistry`-ből; enumokhoz a registry menet közben gyárt parsert, így azokat nem
-kell regisztrálni.
+**The sweep export ignores the RSSI0 offset.** With `free-rssi0` on, the curve in `sweep.csv` is not the curve the optimizer actually minimised, and its minimum won't line up with the reported `n`. Harmless if you never use the flag.
 
-```csharp
-var registry = ParserRegistry.CreateDefault()   // szöveg, egész, szám, igen/nem, karakter
-    .Register(new TimeSpanParser())             // saját típus
-    .Register("MAC-cím", MacAddress.Parse);     // vagy egyetlen függvénnyel
-```
+**`worst` and `sweep.csv` come from the last strategy executed** — described in the code as "the finest". Running all five that's `per-ap`, which is the intent; pin a single strategy and both come from that one. It's ordering-dependent rather than sorted by granularity.
 
-Saját parser a `ValueParser<T>`-ből származik. A hibás bemenet **nem kivétel, hanem
-visszaadott eredmény** – a felhasználó elgépelése normális esemény, nem programhiba:
-
-```csharp
-public sealed class PathParser : ValueParser<string>
-{
-    public override string TypeName => "útvonal";
-
-    protected override ParseResult ParseCore(string text) =>
-        text.Trim().Length > 0
-            ? ParseResult.Ok(text.Trim())
-            : ParseResult.Fail("az útvonal nem lehet üres.");
-}
-```
-
-Egy property felül is írhatja a típus szerinti alapértelmezést az
-`[Option(Parser = typeof(...))]` megadásával – így lehet két `string` paraméternek két
-különböző értelmezése (pl. útvonal és rögzített névlista).
-
-A véges értékkészletű paraméterekhez van kész `ChoiceParser`, ami már a beírás
-pillanatában visszautasítja a rossz nevet, és fel is sorolja az elfogadottakat:
-
-```csharp
-public sealed class OptimizerParser() : ChoiceParser(["grid", "golden", "hybrid"]);
-```
-
-### A shell
-
-A `CommandShell<TSettings>` ismeri a `help`, `show`, `set`, `reset` és `exit`
-parancsokat; az alkalmazás ehhez adja a sajátjait.
-
-```csharp
-CommandShell<CalibrationSettings>
-    .Create(ParserRegistry.CreateDefault(), new CalibrationSettings())
-    .WithPrompt("rssi")
-    .WithBanner(PrintBanner)
-    .Register(new RunCommand())
-    .Run();
-```
-
-A felhasználói hibák (ismeretlen parancs, rossz érték, hiányzó fájl) nem szakítják meg
-a munkamenetet: a shell kiírja őket, és jöhet a következő parancs.
-
----
-
-## 14. Mi van kész és mi hiányzik még
-
-### Kész
-
-- Interaktív shell: `help` / `show` / `set` / `reset` / `run` / `exit`, aliasokkal,
-  idézőjeles értékekkel, kommentekkel, barátságos hibakezeléssel.
-- Attribútum-vezérelt paraméterkezelés (Argus), automatikus súgóval.
-- CSV beolvasás validációval, tizedesvessző-tűréssel, mintaösszevonással
-  (`none` / `mean` / `median`).
-- Log-distance path-loss modell.
-- 5 célfüggvény: `mean`, `median`, `rmse`, `huber`, `composite`.
-- 3 optimalizáló: `grid`, `golden`, `hybrid`.
-- 5 csoportosítási stratégia + automatikus összehasonlítás.
-- Opcionális `RSSI0`-eltolás keresés (`free-rssi0`).
-- Zárt képletű kontrollbecslés az `n`-re (legkisebb négyzetek).
-- Teljes hibastatisztika: MAE, medián, RMSE, P90, max.
-- Konzolriportok + 3 CSV export (`summary`, `residuals`, `sweep`).
-
-### Hiányzik / jövőbeli ötletek
-
-**Validáció és megbízhatóság**
-
-- Nincs **keresztvalidáció** (train/test szétválasztás). A program figyelmeztet a
-  túlillesztésre, de nem méri meg – pedig ez adná meg az igazi választ arra, melyik
-  stratégiát érdemes választani.
-- Nincs **bizonytalanságbecslés** az `n`-re (pl. bootstrap konfidencia-intervallum).
-- Nincs **automatikus stratégia-ajánlás** a végén.
-- Nincs **egységteszt** egyetlen projektben sem.
-
-**Modell**
-
-- Csak egy path-loss modell van (`LogDistanceModel`), és **nem lehet beállításból
-  cserélni**. Az `IPathLossModel` interfész kész, hiányzik pl. az ITU beltéri modell
-  vagy a falszám-korrekció.
-- Az `IPathLossModel.EstimateRssi` implementálva van, de sehol nem használjuk
-  (jelenleg holt kód).
-- Nincs **relatív hiba** célfüggvény (%-ban). Jelenleg minden hibát méterben mérünk,
-  ezért a nagy távolságok automatikusan túlsúlyt kapnak.
-- Nincs mérési **súlyozás** (pl. közeli pontok fontosabbak).
-
-**Beállíthatóság**
-
-- A célfüggvények belső paraméterei **be vannak drótozva**: a Huber-küszöb (10 m), a
-  `composite` súlya (0.3) és kvantilise (0.90). Nem lehet a shellből állítani.
-- Az optimalizálók paraméterei szintén: rácsfelbontás (5001 / 201), tolerancia.
-- Az `RSSI0`-eltolás tartománya (±10 dBm) és felbontása (81 lépés) sem állítható.
-- Nincs **config mentés/betöltés**: a beállítások nem élik túl a kilépést.
-- A `Program.Main` megkapja a parancssori argumentumokat, de **nem használja**;
-  nincs egylövetű mód (pl. `dotnet run -- run`).
-
-**Kimenet**
-
-- A `sweep.csv` mindig csak **egy** stratégia görbéit tartalmazza (az utoljára
-  futtatottét), nem választható.
-- A sweep-görbe **nem veszi figyelembe az `RSSI0`-eltolást**, ezért `free-rssi0`
-  bekapcsolt állapotában a görbe minimuma nem esik egybe a táblázatban szereplő `n`-nel.
-- A CSV kiírás **nem escape-eli** a vesszőt és az idézőjelet – ha egy gyártónév vesszőt
-  tartalmaz, elcsúszik a kimenet.
-- A kimeneti CSV mindig vesszős/pontos, nem követi a `separator` beállítást.
-- Nincs futásidő-mérés, nincs naplózás.
-- Nincs grafikus kimenet (a sweep-görbét kézzel kell Excelben ábrázolni).
-
-**Használhatóság**
-
-- Az Argus beépített parancsainak súgószövege **angol**, míg a projekt többi része
-  magyar – vegyes a felület nyelve.
-- Nincs parancstörténet és tab-kiegészítés a promptban.
-- Nincs `version` / `about` parancs.
-- A `CommandLexer` idézőjel-escape-elése `""` formájú; a `\"` nincs támogatva
-  (kódban jelölt TODO).
+**Groups are never checked for a minimum sample count.** A group with two readings gets an `n` reported with the same authority as one with 144, and with `median` on two samples the objective is just their average. Nothing warns about this.

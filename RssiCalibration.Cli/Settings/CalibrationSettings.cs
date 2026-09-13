@@ -1,6 +1,6 @@
 using RssiCalibration.Core.Optimization;
 using RssiCalibration.Data;
-using VisiLib.Args;
+using VLib.Args;
 
 namespace RssiCalibration.Cli.Settings
 {
@@ -24,15 +24,22 @@ namespace RssiCalibration.Cli.Settings
             Aliases = new[] { "a" },
             Category = DataCategory,
             Parser = typeof(PathParser),
-            Help = "Az access point-ok CSV fájlja (ApId, Vendor, FrequencyMHz, Rssi0).")]
+            Help = "Az eszközök CSV fájlja (Vendor, FrequencyGHz, Rssi0).")]
         public string AccessPointsPath { get; set; } = Path.Combine("data", "access-points.csv");
 
         [Option("measurements",
             Aliases = new[] { "m", "mer" },
             Category = DataCategory,
             Parser = typeof(PathParser),
-            Help = "A mérések CSV fájlja (ApId, PointId, Rssi, TrueDistance).")]
+            Help = "A távolságok CSV fájlja (ApId, PointId, TrueDistance).")]
         public string MeasurementsPath { get; set; } = Path.Combine("data", "measurements.csv");
+
+        [Option("readings",
+            Aliases = new[] { "rd", "leolvasas" },
+            Category = DataCategory,
+            Parser = typeof(PathParser),
+            Help = "Az RSSI leolvasások CSV fájlja (ApId, PointId, Vendor, FrequencyGHz, Rssi).")]
+        public string ReadingsPath { get; set; } = Path.Combine("data", "readings.csv");
 
         [Option("separator",
             Aliases = new[] { "sep" },
@@ -44,7 +51,7 @@ namespace RssiCalibration.Cli.Settings
         [Option("aggregate",
             Aliases = new[] { "agg" },
             Category = DataCategory,
-            Help = "Több RSSI minta összevonása (AP, pont) páronként.")]
+            Help = "Több RSSI minta összevonása (AP, pont, eszköz) hármasonként.")]
         public SampleAggregation Aggregation { get; set; } = SampleAggregation.None;
 
         [Option("objective",
@@ -110,23 +117,24 @@ namespace RssiCalibration.Cli.Settings
         /// Azokat a feltételeket ellenőrzi, amiket egyetlen paraméter önmagában nem tud:
         /// két érték egymáshoz való viszonyát, illetve a bemeneti fájlok meglétét.
         /// </summary>
-        /// <exception cref="VisiArgException">Ha a beállítások így nem futtathatók.</exception>
+        /// <exception cref="VLibArgException">Ha a beállítások így nem futtathatók.</exception>
         public void Validate()
         {
             if (NMax <= NMin)
             {
-                throw new VisiArgException(
+                throw new VLibArgException(
                     $"Az nmax ({NMax}) nem lehet kisebb vagy egyenlő az nmin-nél ({NMin}).",
                     "Például: set nmin 1.5   majd   set nmax 5");
             }
 
             if (WorstCount < 0)
             {
-                throw new VisiArgException("A worst értéke nem lehet negatív.");
+                throw new VLibArgException("A worst értéke nem lehet negatív.");
             }
 
             RequireFile(AccessPointsPath, "aps");
             RequireFile(MeasurementsPath, "measurements");
+            RequireFile(ReadingsPath, "readings");
         }
 
         /// <summary>
@@ -139,7 +147,7 @@ namespace RssiCalibration.Cli.Settings
         {
             if (!File.Exists(path))
             {
-                throw new VisiArgException(
+                throw new VLibArgException(
                     $"Nincs meg a fájl: {Path.GetFullPath(path)}",
                     $"Állítsd át így: set {optionName} <útvonal>");
             }

@@ -14,6 +14,6 @@ namespace RssiCalibration.Core.Grouping
         public string Description => "Gyártó + frekvenciasáv kombinációnként külön n";
 
         /// <inheritdoc />
-        public GroupKey GetKey(AccessPoint ap) => new GroupKey($"{ap.Vendor} @ {ap.Band}");
+        public GroupKey GetKey(Measurement m) => new GroupKey($"{m.Vendor} @ {m.Band}");
     }
 }

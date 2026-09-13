@@ -6,17 +6,37 @@ namespace RssiCalibration.Core.Models
     /// </summary>
     public sealed record ResidualRow
     {
-        public readonly string ApId; 
+        public readonly string ApId;
         public readonly string PointId;
+
+        /// <summary>
+        /// A mérésnél az AP-helyen lévő eszköz gyártója.
+        /// </summary>
+        public readonly string Vendor;
+
+        /// <summary>
+        /// A mérésnél az AP-helyen lévő eszköz frekvenciája GHz-ben.
+        /// </summary>
+        public readonly double FrequencyGHz;
+
         public readonly double Rssi;
         public readonly double TrueDistance;
         public readonly double EstimatedDistance;
         public double Error => EstimatedDistance - TrueDistance;
 
-        public ResidualRow(string apId, string pointId, double rssi, double trueDistance, double estimatedDistance)
+        public ResidualRow(
+            string apId,
+            string pointId,
+            string vendor,
+            double frequencyGHz,
+            double rssi,
+            double trueDistance,
+            double estimatedDistance)
         {
             ApId = apId;
             PointId = pointId;
+            Vendor = vendor;
+            FrequencyGHz = frequencyGHz;
             Rssi = rssi;
             TrueDistance = trueDistance;
             EstimatedDistance = estimatedDistance;

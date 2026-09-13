@@ -1,5 +1,5 @@
 using RssiCalibration.Cli.Settings;
-using VisiLib.Args.Shell;
+using VLib.Args.Shell;
 
 namespace RssiCalibration.Cli.Commands
 {

@@ -2,8 +2,8 @@ using System.Globalization;
 using System.Text;
 using RssiCalibration.Cli.Commands;
 using RssiCalibration.Cli.Settings;
-using VisiLib.Args.Parsing;
-using VisiLib.Args.Shell;
+using VLib.Args.Parsing;
+using VLib.Args.Shell;
 
 namespace RssiCalibration.Cli
 {
@@ -50,7 +50,7 @@ namespace RssiCalibration.Cli
         private static void PrintBanner(ShellOutput output)
         {
             output.Line("RSSI path-loss kalibráció");
-            output.Muted("Az optimális n (környezeti csillapítás) keresése a log-distance modellhez.");
+            output.Muted("Az optimális n keresése.");
             output.Line();
             output.Line("Így használd:");
             output.Line("  show                    a jelenlegi beállítások megtekintése");

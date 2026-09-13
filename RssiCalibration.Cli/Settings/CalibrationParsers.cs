@@ -1,7 +1,7 @@
 using RssiCalibration.Core.Grouping;
 using RssiCalibration.Core.Objectives;
-using VisiLib.Args.Parsing;
-using VisiLib.Args.Parsing.Builtin;
+using VLib.Args.Parsing;
+using VLib.Args.Parsing.Builtin;
 
 namespace RssiCalibration.Cli.Settings
 {
